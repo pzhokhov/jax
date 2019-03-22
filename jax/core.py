@@ -24,7 +24,7 @@ import six
 import types
 
 from . import linear_util as lu
-from .util import unzip2, safe_zip, safe_map, partial
+from .util import unzip2, safe_zip, safe_map, partial, WrapHashably
 from .pprint_util import pp, vcat, hcat, pp_kv_pairs
 
 # TODO(dougalm): the trace cache breaks the leak detector. Consisder solving.
@@ -60,6 +60,15 @@ class Jaxpr(object):
 JaxprEqn = namedtuple('JaxprEqn', ['invars', 'outvars', 'primitive',
                                    'bound_subjaxprs', 'destructure', 'params'])
 
+enable_cse = True
+cse_table = {}
+
+def _cse_id(x):
+  if isinstance(x, (int, float)):
+    return x
+  else:
+    return WrapHashably(x)
+
 class Primitive(object):
   def __init__(self, name):
     self.name = name
@@ -70,13 +79,24 @@ class Primitive(object):
   def bind(self, *args, **kwargs):
     assert skip_checks or all(isinstance(arg, Tracer)
                               or valid_jaxtype(arg) for arg in args), args
+
+    key = (self,) + tuple(map(_cse_id, args))
+    if not kwargs:
+      if key in cse_table:
+        return cse_table[key]
+
     top_trace = find_top_trace(args)
     if top_trace is None:
       return self.impl(*args, **kwargs)
 
     tracers = map(top_trace.full_raise, args)
     out_tracer = top_trace.process_primitive(self, tracers, kwargs)
-    return full_lower(out_tracer)
+    out = full_lower(out_tracer)
+
+    if enable_cse and not kwargs:
+      cse_table[key] = out
+
+    return out
 
   def def_impl(self, impl):
     self.impl = impl
