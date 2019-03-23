@@ -21,7 +21,7 @@ import six
 
 from . import core
 from . import ad_util
-from . util import prod
+from . util import prod, partial
 from .lib import xla_bridge
 
 
@@ -160,9 +160,11 @@ def make_shaped_array(x):
   dtype = xla_bridge.canonicalize_dtype(onp.result_type(x))
   return ShapedArray(onp.shape(x), dtype)
 
-def zeros_like_array(x):
+def const_like_array(scalar_const, x):
   dtype = xla_bridge.canonicalize_dtype(onp.result_type(x))
-  return onp.broadcast_to(onp.array(0, dtype), onp.shape(x))
+  return onp.broadcast_to(onp.array(scalar_const, dtype), onp.shape(x))
+zeros_like_array = partial(const_like_array, 0)
+ones_like_array = partial(const_like_array, 1)
 
 array_types = [onp.ndarray, onp.float64, onp.float32, onp.float16,
                onp.complex64, onp.complex128,
@@ -173,3 +175,4 @@ array_types = [onp.ndarray, onp.float64, onp.float32, onp.float16,
 for t in array_types:
   core.pytype_aval_mappings[t] = ConcreteArray
   ad_util.jaxval_zeros_likers[t] = zeros_like_array
+  ad_util.jaxval_ones_likers[t] = ones_like_array

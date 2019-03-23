@@ -329,11 +329,27 @@ class CoreTest(jtu.JaxTestCase):
     d_sin = fwd_deriv(np.sin)
     d2_sin = fwd_deriv(d_sin)
     d3_sin = fwd_deriv(d2_sin)
+    d4_sin = fwd_deriv(d3_sin)
+    d5_sin = fwd_deriv(d4_sin)
 
     assert d_sin(0.0) == 1.0
     assert d2_sin(0.0) == 0.0
     assert d3_sin(0.0) == -1.0
+    assert d4_sin(0.0) == 0.0
+    assert d5_sin(0.0) == 1.0
 
+  def test_jvp_3(self):
+    d_tanh = fwd_deriv(np.tanh)
+    d2_tanh = fwd_deriv(d_tanh)
+    d3_tanh = fwd_deriv(d2_tanh)
+    d4_tanh = fwd_deriv(d3_tanh)
+    d5_tanh = fwd_deriv(d4_tanh)
+
+    self.assertAllClose(d_tanh(2.0),   0.0706508, check_dtypes=False)
+    self.assertAllClose(d2_tanh(2.0), -0.1362186, check_dtypes=False)
+    self.assertAllClose(d3_tanh(2.0),  0.2526541, check_dtypes=False)
+    self.assertAllClose(d4_tanh(2.0), -0.4293872, check_dtypes=False)
+    self.assertAllClose(d5_tanh(2.0),  0.5737473, check_dtypes=False)
 
 if __name__ == '__main__':
   absltest.main()

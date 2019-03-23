@@ -213,18 +213,21 @@ translations[core.call_p] = lambda c, subc_a1, *a2: c.Call(subc_a1[0],
                                                            subc_a1[1] + a2)
 translations[core.identity_p] = lambda c, x: x
 
-# TODO(mattjj): add_jaxvals should handle any jaxval
-def zeros_like_translation_rule(c, x):
-  def _zeros_like(shape):
+def const_like_translation_rule(val, c, x):
+  def _const_like(shape):
     if shape.is_tuple():
-      return c.Tuple(*(_zeros_like(x) for x in shape.tuple_shapes()))
+      return c.Tuple(*(_const_like(x) for x in shape.tuple_shapes()))
     else:
-      return c.Broadcast(c.Constant(onp.array(0, shape.element_type())),
+      return c.Broadcast(c.Constant(onp.array(val, shape.element_type())),
                          shape.dimensions())
-  return _zeros_like(c.GetShape(x))
+  return _const_like(c.GetShape(x))
 
-translations[ad_util.zeros_like_p] = zeros_like_translation_rule
+translations[ad_util.zeros_like_p] = partial(const_like_translation_rule, 0)
+translations[ad_util.ones_like_p] = partial(const_like_translation_rule, 1)
+
+# TODO(mattjj): add_jaxvals and mul_jaxvals should handle any jaxval
 translations[ad_util.add_jaxvals_p] = lambda c, x, y: c.Add(x, y)
+translations[ad_util.mul_jaxvals_p] = lambda c, x, y: c.Mul(x, y)
 
 
 def canonicalize_pyval_dtype(x):

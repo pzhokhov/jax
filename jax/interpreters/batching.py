@@ -27,7 +27,8 @@ from six.moves import reduce
 from .. import core
 from ..core import Trace, Tracer, new_master, pack, AbstractTuple, JaxTuple
 from ..abstract_arrays import ShapedArray, make_shaped_array, array_types
-from ..ad_util import add_jaxvals_p, zeros_like_p, zeros_like_jaxval
+from ..ad_util import (add_jaxvals_p, zeros_like_p, zeros_like_jaxval,
+                       mul_jaxvals_p, ones_like_p, ones_like_jaxval)
 from ..linear_util import transformation, transformation_with_aux, wrap_init
 from ..tree_util import register_pytree_node
 from ..util import unzip2, partial, safe_map
@@ -255,23 +256,25 @@ def reducer_batcher(prim, batched_args, batch_dims, axes, **params):
 
 # set up primitive batches for ad_util primitives
 
-def add_batched(batched_args, batch_dims):
+def jaxval_op_batched(jaxval_op, batched_args, batch_dims):
   bdx, bdy = batch_dims
   xs, ys = batched_args
   if bdx == bdy:
-    return add_jaxvals_p.bind(xs, ys), bdx
+    return jaxval_op.bind(xs, ys), bdx
   else:
     sz = (dimsize(bdx, xs) | dimsize(bdy, ys)).pop()
     move_bdim = partial(bdim_at_front, broadcast_size=sz, force_broadcast=True)
     xs, ys = map(move_bdim, batched_args, batch_dims)
-    return add_jaxvals_p.bind(xs, ys), 0
-primitive_batchers[add_jaxvals_p] = add_batched
+    return jaxval_op.bind(xs, ys), 0
+primitive_batchers[add_jaxvals_p] = partial(jaxval_op_batched, add_jaxvals_p)
+primitive_batchers[mul_jaxvals_p] = partial(jaxval_op_batched, mul_jaxvals_p)
 
-def zeros_like_batched(batched_args, batch_dims):
+def const_like_batched(const_liker, batched_args, batch_dims):
   val, = batched_args
   bdim, = batch_dims
-  return zeros_like_jaxval(val), bdim
-primitive_batchers[zeros_like_p] = zeros_like_batched
+  return const_liker(val), bdim
+primitive_batchers[zeros_like_p] = partial(const_like_batched, zeros_like_jaxval)
+primitive_batchers[ones_like_p] = partial(const_like_batched, ones_like_jaxval)
 
 
 ### util

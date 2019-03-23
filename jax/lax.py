@@ -1448,12 +1448,14 @@ ShapedArray._iter = staticmethod(_iter)
 
 # Add some ad handlers that use (or could use) lax primitives
 
-def zeros_like_array(x):
-  return full_like(x, 0)
+def zeros_like_array(x): return full_like(x, 0)
+def ones_like_array(x): return full_like(x, 1)
 
-for t in itertools.chain(array_types, [xla.DeviceArray]):
+for t in itertools.chain(array_types, [xla.DeviceArray, pxla.ShardedDeviceArray]):
   ad_util.jaxval_adders[t] = add
+  ad_util.jaxval_mulers[t] = mul
 ad_util.jaxval_zeros_likers[xla.DeviceArray] = zeros_like_array
+ad_util.jaxval_ones_likers[xla.DeviceArray] = ones_like_array
 
 batching.pytype_aval_mappings[xla.DeviceArray] = make_shaped_array
 
@@ -1626,6 +1628,7 @@ ad.defjvp(tanh_p, lambda g, x: div(g, pow(cosh(x), _two(x))))
 
 sin_p = standard_unop(_float | _complex, 'sin')
 ad.defjvp(sin_p, lambda g, x: mul(g, cos(x)))
+ad.def_elementwise_unary(sin_p)
 
 cos_p = standard_unop(_float | _complex, 'cos')
 ad.defjvp(cos_p, lambda g, x: neg(mul(g, sin(x))))
@@ -3995,6 +3998,7 @@ for _t in [_FilledConstant, _IotaConstant, _EyeConstant]:
   xla.canonicalize_dtype_handlers[_t] = identity
   batching.pytype_aval_mappings[_t] = make_shaped_array
   ad_util.jaxval_adders[_t] = add
+  ad_util.jaxval_mulers[_t] = mul
   ad_util.jaxval_zeros_likers[_t] = zeros_like_array
 
 

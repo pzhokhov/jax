@@ -22,6 +22,7 @@ from .util import safe_map
 
 map = safe_map
 
+
 jaxval_adders = {}
 
 def add_jaxtuples(xs, ys):
@@ -29,7 +30,6 @@ def add_jaxtuples(xs, ys):
   return JaxTuple(map(add_impl, xs, ys))
 
 jaxval_adders[JaxTuple] = add_jaxtuples
-
 
 def add_jaxvals(x, y):
   return add_jaxvals_p.bind(x, y)
@@ -45,12 +45,12 @@ def add_impl(xs, ys):
 def add_abstract(xs, ys):
   return lattice_join(xs, ys)
 
+
 def zeros_like_impl_jaxtuple(xs):
   return JaxTuple(map(zeros_like_impl, xs))
 
 jaxval_zeros_likers = {}
 jaxval_zeros_likers[JaxTuple] = zeros_like_impl_jaxtuple
-
 
 def zeros_like_jaxval(val):
   return zeros_like_p.bind(val)
@@ -63,11 +63,55 @@ def zeros_like_impl(example):
 
 zeros_like_p.def_abstract_eval(lambda x: x)
 
-
 class Zero(object):
   def __repr__(self):
     return "Zero"
-
 zero = Zero()
-
 register_pytree_node(Zero, lambda z: ((), None), lambda _, xs: zero)
+
+
+jaxval_mulers = {}
+
+def mul_jaxtuples(xs, ys):
+  assert len(xs) == len(ys)
+  return JaxTuple(map(mul_impl, xs, ys))
+
+jaxval_mulers[JaxTuple] = mul_jaxtuples
+
+def mul_jaxvals(x, y):
+  return mul_jaxvals_p.bind(x, y)
+
+mul_jaxvals_p = Primitive('mul_any')
+
+@mul_jaxvals_p.def_impl
+def mul_impl(xs, ys):
+  # assert type(xs) == type(ys), (xs, ys)
+  return jaxval_mulers[type(xs)](xs, ys)
+
+@mul_jaxvals_p.def_abstract_eval
+def mul_abstract(xs, ys):
+  return lattice_join(xs, ys)
+
+
+def ones_like_impl_jaxtuple(xs):
+  return JaxTuple(map(ones_like_impl, xs))
+
+jaxval_ones_likers = {}
+jaxval_ones_likers[JaxTuple] = ones_like_impl_jaxtuple
+
+def ones_like_jaxval(val):
+  return ones_like_p.bind(val)
+
+ones_like_p = Primitive('ones_like')
+
+@ones_like_p.def_impl
+def ones_like_impl(example):
+  return jaxval_ones_likers[type(example)](example)
+
+ones_like_p.def_abstract_eval(lambda x: x)
+
+class One(object):
+  def __repr__(self):
+    return "One"
+one = One()
+register_pytree_node(One, lambda z: ((), None), lambda _, xs: one)

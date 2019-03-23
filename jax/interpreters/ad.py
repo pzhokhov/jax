@@ -21,8 +21,9 @@ import itertools as it
 from . import partial_eval as pe
 from .. import core as core
 from ..core import JaxTuple, Trace, Tracer, new_master, get_aval, pack, call_p, Primitive
-from ..ad_util import (add_jaxvals, add_jaxvals_p, zeros_like_jaxval,
-                       zeros_like_p, zero, Zero)
+from ..ad_util import (add_jaxvals, add_jaxvals_p, mul_jaxvals, mul_jaxvals_p,
+                       zeros_like_jaxval, zeros_like_p, zero, Zero,
+                       ones_like_jaxval, ones_like_p, one, One)
 from ..util import unzip2, unzip3, safe_map, safe_zip, partial
 from ..tree_util import process_pytree, build_tree, register_pytree_node, tree_map
 from ..linear_util import thunk, staged, transformation, transformation_with_aux, wrap_init
@@ -44,8 +45,9 @@ def jvp(fun, has_aux=False):
 @transformation
 def jvpfun(primals, tangents):
   with new_master(JVPTrace) as master:
-    out_primal, out_tangent = yield master, primals, tangents
+    out_primal, out_tangent, out_jac = yield master, primals, tangents
     del master
+  out_tangent = mul_diagjac(out_tangent, out_jac)
   out_tangent = instantiate_zeros(out_primal, out_tangent)
   yield (out_primal, out_tangent)
 
@@ -57,8 +59,7 @@ def jvp_subtrace(master, primals, tangents):
       assert x.trace.level < trace.level
   ans = yield map(partial(JVPTracer, trace), primals, tangents)
   out_tracer = trace.full_raise(ans)
-  out_primal, out_tangent = out_tracer.primal, out_tracer.tangent
-  yield (out_primal, out_tangent)
+  yield out_tracer.primal, out_tracer.tangent, out_tracer.diag_jac
 
 @transformation_with_aux
 def jvp_subtrace_aux(master, primals, tangents):
@@ -68,9 +69,9 @@ def jvp_subtrace_aux(master, primals, tangents):
       assert x.trace.level < trace.level
   ans, aux = yield map(partial(JVPTracer, trace), primals, tangents)
   out_tracer, aux_tracer = map(trace.full_raise, (ans, aux))
-  out_primal, out_tangent = out_tracer.primal, out_tracer.tangent
+  out_data = out_tracer.primal, out_tracer.tangent, out_tracer.diag_jac
   aux = aux_tracer.primal  # ignore aux tangent
-  yield (out_primal, out_tangent), aux
+  yield out_data, aux
 
 
 @transformation
@@ -80,6 +81,7 @@ def pack_output(*args):
 
 def linearize(traceable, *primals, **kwargs):
   has_aux = kwargs.pop('has_aux', False)
+  assert not kwargs
   if not has_aux:
     jvpfun = pack_output(jvp(traceable))
   else:
@@ -200,31 +202,42 @@ class JVPTrace(Trace):
     return JVPTracer(self, val, zero)
 
   def sublift(self, val):
-    return JVPTracer(self, val.primal, val.tangent)
+    return JVPTracer(self, val.primal, mul_diagjac(val.tangent, val.diag_jac))
 
   def process_primitive(self, primitive, tracers, params):
     primals_in = [t.primal for t in tracers]
     tangents_in = [t.tangent for t in tracers]
+    jacs_in = [t.diag_jac for t in tracers]
     try:
       jvp = primitive_jvps[primitive]
     except KeyError:
       raise NotImplementedError(
           "Forward-mode differentiation rule for '{}' not implemented"
           .format(primitive))
-    primal_out, tangent_out = jvp(primals_in, tangents_in, **params)
-    return JVPTracer(self, primal_out, tangent_out)
+    if primitive in elementwise_unary_primitives:
+      tangent_in, = tangents_in
+      jacs_in = instantiate_ones(primals_in[0], jacs_in[0]),
+      primal_out, jac = jvp(primals_in, jacs_in, **params)
+      return JVPTracer(self, primal_out, tangent_in, jac)
+    else:
+      tangents_in = map(mul_diagjac, tangents_in, jacs_in)
+      primal_out, tangent_out = jvp(primals_in, tangents_in, **params)
+      return JVPTracer(self, primal_out, tangent_out)
 
   def process_call(self, call_primitive, f, tracers, params):
+    # TODO(mattjj): could propagate diag_jac through here
     primals = [t.primal for t in tracers]
-    tangents = [t.tangent for t in tracers]
+    tangents = [mul_diagjac(t.tangent, t.diag_jac) for t in tracers]
     nonzero_tangents, in_tree_def = tree_to_jaxtuples(tangents)
     f, out_tree_def = traceable(jvp_subtrace(f, self.master), in_tree_def)
     result = call_primitive.bind(f, pack(primals), nonzero_tangents, **params)
-    primal_out, tangent_out = build_tree(out_tree_def(), result)
+    primal_out, tangent_out, jac_out = build_tree(out_tree_def(), result)
+    tangent_out = mul_diagjac(tangent_out, jac_out)
     return JVPTracer(self, primal_out, tangent_out)
 
   def post_process_call(self, _, out_tracer):
-    out_jtuple, tree_def = tree_to_jaxtuples((out_tracer.primal, out_tracer.tangent))
+    tangent = mul_diagjac(out_tracer.tangent, out_tracer.diag_jac)
+    out_jtuple, tree_def = tree_to_jaxtuples((out_tracer.primal, tangent))
     master = self.master
     def todo(x):
       trace = JVPTrace(master, core.cur_sublevel())
@@ -263,17 +276,19 @@ class JVPTrace(Trace):
 
   def pack(self, tracers):
     primals = pack(t.primal for t in tracers)
-    tangents = TangentTuple([t.tangent for t in tracers])
+    # TODO(mattjj): be tuple-transparent for diag jacs here
+    tangents = TangentTuple([mul_diagjac(t.tangent, t.diag_jac) for t in tracers])
     return JVPTracer(self, primals, tangents)
 
 
 class JVPTracer(Tracer):
-  __slots__ = ['primal', 'tangent']
+  __slots__ = ['primal', 'tangent', 'diag_jac']
 
-  def __init__(self, trace, primal, tangent):
+  def __init__(self, trace, primal, tangent, diag_jac=one):
     self.trace = trace
     self.primal = primal
     self.tangent = tangent
+    self.diag_jac = diag_jac
     # TODO(mattjj,dougalm): behind skip_checks, check primal/tangent shapes and
     # dtypes agree (up to jax_enable_x64 flag)
 
@@ -286,6 +301,7 @@ class JVPTracer(Tracer):
     if self.tangent is zero:
       return self.full_lower()
     else:
+      assert self.diag_jac is one
       return map(partial(JVPTracer, self.trace), self.primal, self.tangent)
 
   def full_lower(self):
@@ -300,7 +316,13 @@ class JVPTracer(Tracer):
 primitive_jvps = {}
 composite_jvps = {}
 
+elementwise_unary_primitives = set()
+
 primitive_transposes = {}
+
+
+def def_elementwise_unary(primitive):
+  elementwise_unary_primitives.add(primitive)
 
 
 def deflinear(primitive, transpose_rule):
@@ -353,6 +375,14 @@ def add_tangents(x, y):
   else:
     return add_jaxvals(x, y)
 
+def mul_diagjac(tangent, diag_jac):
+  if diag_jac is one:
+    return tangent
+  elif tangent is zero:
+    return zero
+  else:
+    return mul_jaxvals(tangent, diag_jac)
+
 
 def defbilinear_broadcasting(bcast, prim, lhs_rule, rhs_rule):
   assert isinstance(prim, Primitive)
@@ -361,7 +391,6 @@ def defbilinear_broadcasting(bcast, prim, lhs_rule, rhs_rule):
   defjvp(prim, lhs_jvp, rhs_jvp)
   primitive_transposes[prim] = partial(bilinear_transpose, lhs_rule, rhs_rule)
 defbilinear = partial(defbilinear_broadcasting, lambda g, x: g)
-
 
 def bilinear_transpose(lhs_rule, rhs_rule, cotangent, x, y, **kwargs):
   assert (x is None) ^ (y is None)
@@ -383,9 +412,16 @@ def zero_jvp(primitive, primals, tangents, **params):
 
 
 deflinear(zeros_like_p, lambda t: [zero])
+defjvp(ones_like_p, lambda g, x: zero)
 deflinear(core.identity_p, lambda t: (t,))
 deflinear(core.pack_p, lambda t: list(t) if t is not zero else zero)
 deflinear(add_jaxvals_p, lambda t: (t, t))
+
+defjvp(mul_jaxvals_p,
+       lambda g, x, y: mul_jaxvals(g, y),
+       lambda g, x, y: mul_jaxvals(x, g))
+primitive_transposes[mul_jaxvals_p] = partial(
+    bilinear_transpose, mul_jaxvals, lambda t, x: mul_jaxvals(x, t))
 
 
 def instantiate_zeros(example, tangent):
@@ -396,11 +432,19 @@ def instantiate_zeros(example, tangent):
   else:
     return tangent
 
+def instantiate_ones(example, diag_jac):
+  if diag_jac is one:
+    return ones_like_jaxval(example)
+  elif isinstance(diag_jac, TangentTuple):
+    return pack(map(instantiate_ones, example, diag_jac))
+  else:
+    return diag_jac
+
 @transformation_with_aux
 def traceable(in_tree_def, new_primals, new_tangents):
   new_tangents = build_tree(in_tree_def, new_tangents)
-  primal_out, tangent_out = yield new_primals, new_tangents
-  out_jtuple, tree_def = tree_to_jaxtuples((primal_out, tangent_out))
+  primal_out, tangent_out, jac_out = yield new_primals, new_tangents
+  out_jtuple, tree_def = tree_to_jaxtuples((primal_out, tangent_out, jac_out))
   yield out_jtuple, tree_def
 
 @transformation_with_aux
