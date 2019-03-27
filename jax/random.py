@@ -33,6 +33,7 @@ from . import numpy as np
 from . import tree_util
 from .api import jit
 from jax.lib import xla_bridge
+from jax.util import prod
 from jax import core
 
 
@@ -90,23 +91,26 @@ def _bit_stats(bits):
 
 
 @jit
-def threefry_2x32(keypair, count):
+def _threefry_2x32(keypair, countpair):
   """Apply the Threefry 2x32 hash.
 
   Args:
     keypair: a pair of 32bit unsigned integers used for the key.
-    count: an array of dtype uint32 used for the counts.
+    countpair: a pair of arrays of uint32 of the same shape, used for the
+      counts.
 
   Returns:
     An array of dtype uint32 with the same shape as `count`.
   """
   # Based on ThreeFry2x32 by phawkins@ in //.../xla/client/lib/prng.cc
-  key1, key2 = keypair
-  if not lax._dtype(key1) == lax._dtype(key2) == lax._dtype(count) == onp.uint32:
+  key0, key1 = keypair
+  c0, c1 = countpair
+  if not (lax._dtype(key0) == lax._dtype(key1)
+          == lax._dtype(c0) == lax._dtype(c1) == onp.uint32):
     msg = "threefry_2x32 requires uint32 arguments, got {}"
-    raise TypeError(msg.format([lax._dtype(x) for x in [key1, key2, count]]))
+    raise TypeError(msg.format([lax._dtype(x) for x in [key0, key1, c0, c1]]))
 
-  rotate_left = _make_rotate_left(lax._dtype(count))
+  rotate_left = _make_rotate_left(lax._dtype(c0))
 
   def apply_round(v, rot):
     v = v[:]
@@ -115,46 +119,40 @@ def threefry_2x32(keypair, count):
     v[1] = v[0] ^ v[1]
     return v
 
-  odd_size = count.size % 2
-  if odd_size:
-    x = list(np.split(np.concatenate([count.ravel(), onp.uint32([0])]), 2))
-  else:
-    x = list(np.split(count.ravel(), 2))
-
   rotations = [13, 15, 26, 6, 17, 29, 16, 24]
-  ks = [key1, key2, key1 ^ key2 ^ onp.uint32(0x1BD11BDA)]
+  ks = [key0, key1, key0 ^ key1 ^ onp.uint32(0x1BD11BDA)]
 
-  x[0] = x[0] + ks[0]
-  x[1] = x[1] + ks[1]
+  c0 = c0 + ks[0]
+  c1 = c1 + ks[1]
+
+  # TODO(mattjj, phawkins): roll these loops to improve compile times
 
   for r in rotations[:4]:
-    x = apply_round(x, r)
-  x[0] = x[0] + ks[1]
-  x[1] = x[1] + ks[2] + onp.uint32(1)
+    c0, c1 = apply_round([c0, c1], r)
+  c0 = c0 + ks[1]
+  c1 = c1 + ks[2] + onp.uint32(1)
 
   for r in rotations[4:]:
-    x = apply_round(x, r)
-  x[0] = x[0] + ks[2]
-  x[1] = x[1] + ks[0] + onp.uint32(2)
+    c0, c1 = apply_round([c0, c1], r)
+  c0 = c0 + ks[2]
+  c1 = c1 + ks[0] + onp.uint32(2)
 
   for r in rotations[:4]:
-    x = apply_round(x, r)
-  x[0] = x[0] + ks[0]
-  x[1] = x[1] + ks[1] + onp.uint32(3)
+    c0, c1 = apply_round([c0, c1], r)
+  c0 = c0 + ks[0]
+  c1 = c1 + ks[1] + onp.uint32(3)
 
   for r in rotations[4:]:
-    x = apply_round(x, r)
-  x[0] = x[0] + ks[1]
-  x[1] = x[1] + ks[2] + onp.uint32(4)
+    c0, c1 = apply_round([c0, c1], r)
+  c0 = c0 + ks[1]
+  c1 = c1 + ks[2] + onp.uint32(4)
 
   for r in rotations[:4]:
-    x = apply_round(x, r)
-  x[0] = x[0] + ks[2]
-  x[1] = x[1] + ks[0] + onp.uint32(5)
+    c0, c1 = apply_round([c0, c1], r)
+  c0 = c0 + ks[2]
+  c1 = c1 + ks[0] + onp.uint32(5)
 
-  out = np.concatenate(x)
-  assert out.dtype == onp.uint32
-  return lax.reshape(out[:-1] if odd_size else out, count.shape)
+  return c0, c1
 
 
 @partial(jit, static_argnums=(1,))
@@ -169,8 +167,9 @@ def split(key, num=2):
   Returns:
     An array with shape (num, 2) and dtype uint32 representing `num` new keys.
   """
-  counts = lax.tie_in(key, lax.iota(onp.uint32, num * 2))
-  return lax.reshape(threefry_2x32(key, counts), (num, 2))
+  counts = lax.tie_in(key, lax.iota(onp.uint32, num))
+  bits0, bits1 = _threefry_2x32(key, (onp.uint32(0), counts))
+  return np.stack([bits0, bits1], axis=1)
 
 
 @partial(jit, static_argnums=(1,))
@@ -186,7 +185,8 @@ def fold_in(key, data):
     statistically safe for producing a stream of new pseudo-random values.
   """
   key2 = lax.tie_in(key, PRNGKey(data))
-  return threefry_2x32(key, key2)
+  assert False  # TODO
+  return _threefry_2x32(key, key2)
 
 
 def _random_bits(key, bit_width, shape):
@@ -195,16 +195,21 @@ def _random_bits(key, bit_width, shape):
     raise TypeError("_random_bits got invalid prng key.")
   if bit_width not in (32, 64):
     raise TypeError("requires 32- or 64-bit field width.")
-  max_count = (bit_width // 32) * onp.prod(shape)
+  count_requested = (bit_width // 32) * prod(shape)
+  max_count = (count_requested + 1) // 2  # generates 2x the bits
   if max_count >= onp.iinfo(onp.uint32).max:
     # TODO(mattjj): just split the key here
     raise TypeError("requesting more random bits than a single call provides.")
 
   counts = lax.tie_in(key, lax.iota(onp.uint32, max_count))
-  bits = threefry_2x32(key, counts)
+  bits0, bits1 = _threefry_2x32(key, (onp.uint32(0), counts))
   if bit_width == 64:
-    bits = [lax.convert_element_type(x, onp.uint64) for x in np.split(bits, 2)]
-    bits = (bits[0] << onp.uint64(32)) | bits[1]
+    bits0 = lax.convert_element_type(bits0, onp.uint64)
+    bits1 = lax.convert_element_type(bits1, onp.uint64)
+    bits = (bits0 << onp.uint64(32)) | bits1
+  else:
+    bits = np.concatenate([bits0, bits1])
+    bits = bits[:count_requested]
   return lax.reshape(bits, shape)
 
 

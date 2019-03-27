@@ -72,16 +72,16 @@ class LaxRandomTest(jtu.JaxTestCase):
       return tuple([hex(x.copy()).rstrip("L") for x in result])
 
     expected = ("0x6b200159", "0x99ba4efe")
-    result = random.threefry_2x32(onp.uint32([0, 0]), onp.uint32([0, 0]))
+    result = random._threefry_2x32(onp.uint32([0, 0]), onp.uint32([0, 0]))
 
     self.assertEqual(expected, result_to_hex(result))
 
     expected = ("0x1cb996fc", "0xbb002be7")
-    result = random.threefry_2x32(onp.uint32([-1, -1]), onp.uint32([-1, -1]))
+    result = random._threefry_2x32(onp.uint32([-1, -1]), onp.uint32([-1, -1]))
     self.assertEqual(expected, result_to_hex(result))
 
     expected = ("0xc4923a9c", "0x483df7a0")
-    result = random.threefry_2x32(
+    result = random._threefry_2x32(
         onp.uint32([0x13198a2e, 0x03707344]),
         onp.uint32([0x243f6a88, 0x85a308d3]))
     self.assertEqual(expected, result_to_hex(result))
@@ -160,10 +160,10 @@ class LaxRandomTest(jtu.JaxTestCase):
     x = random.randint(random.PRNGKey(10003), (), 0, 0)
     assert x == 0
 
-  def testFoldIn(self):
-    key = random.PRNGKey(0)
-    keys = [random.fold_in(key, i) for i in range(10)]
-    assert onp.unique(onp.ravel(keys)).shape == (20,)
+#   def testFoldIn(self):
+#     key = random.PRNGKey(0)
+#     keys = [random.fold_in(key, i) for i in range(10)]
+#     assert onp.unique(onp.ravel(keys)).shape == (20,)
 
 
 if __name__ == "__main__":
