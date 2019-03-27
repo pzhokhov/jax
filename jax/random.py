@@ -168,7 +168,7 @@ def split(key, num=2):
     An array with shape (num, 2) and dtype uint32 representing `num` new keys.
   """
   counts = lax.tie_in(key, lax.iota(onp.uint32, num))
-  bits0, bits1 = _threefry_2x32(key, (onp.uint32(0), counts))
+  bits0, bits1 = _threefry_2x32(key, (onp.uint32(1), counts))
   return np.stack([bits0, bits1], axis=1)
 
 
