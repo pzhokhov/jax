@@ -34,14 +34,16 @@ echo "Python tag $PY_TAG"
 
 case $2 in
   cuda-included)
-    python build.py --enable_cuda --cudnn_path /usr/lib/x86_64-linux-gnu/
+    python build.py --enable_cuda --cudnn_path /usr/lib/x86_64-linux-gnu/ \
+      --bazel_output_user_root /build/bazel-root
     python include_cuda.py
     ;;
   cuda)
-    python build.py --enable_cuda --cudnn_path /usr/lib/x86_64-linux-gnu/
+    python build.py --enable_cuda --cudnn_path /usr/lib/x86_64-linux-gnu/ \
+      --bazel_output_user_root /build/bazel-root
     ;;
   nocuda)
-    python build.py
+    python build.py --bazel_output_user_root /build/bazel-root
     ;;
   *)
     usage
