@@ -1895,10 +1895,12 @@ def _conv_general_dilated_transpose_lhs(
       window_strides, onp.take(g.shape, out_sdims), padding, lhs_dilation,
       rhs_dilation)
   revd_weights = rev(rhs, rhs_sdims)
-  return conv_general_dilated(
+  out = conv_general_dilated(
       g, revd_weights, window_strides=lhs_dilation, padding=padding,
       lhs_dilation=window_strides, rhs_dilation=rhs_dilation,
       dimension_numbers=trans_dimension_numbers)
+  assert out.shape == lhs_shape
+  return out
 
 def _conv_general_dilated_transpose_rhs(
     g, lhs, window_strides, padding, lhs_dilation, rhs_dilation,
@@ -1911,10 +1913,12 @@ def _conv_general_dilated_transpose_rhs(
       onp.take(lhs_shape, lhs_sdims), onp.take(rhs_shape, rhs_sdims),
       window_strides, onp.take(g.shape, out_sdims), padding, lhs_dilation,
       rhs_dilation)
-  return conv_general_dilated(
+  out = conv_general_dilated(
       lhs, g, window_strides=rhs_dilation, padding=padding,
       lhs_dilation=lhs_dilation, rhs_dilation=window_strides,
       dimension_numbers=trans_dimension_numbers)
+  assert out.shape == rhs_shape
+  return out
 
 def _conv_general_dilated_translation_rule(
     c, lhs, rhs, window_strides, padding, lhs_dilation, rhs_dilation,
