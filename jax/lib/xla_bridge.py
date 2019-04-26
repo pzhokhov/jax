@@ -318,10 +318,57 @@ class _JaxComputationBuilder(xla_client.ComputationBuilder):
       return super(_JaxComputationBuilder, self).AllToAll(
           operand, split_dimension, concat_dimension, replica_groups)
 
+class PyFunc(object):
+    def __init__(self, func, in_vars, out_shape):
+        self.in_vars = in_vars
+        self.func = func
+        self.out_shape = out_shape
+
+    def Compile(self, *args, **kwargs):
+        return self
+
+    def Execute(self, in_bufs, check_buffers=False):
+        retval = self.func(*in_bufs)
+        return (retval,)
+    
+    
+class CompositeComputation(object):
+    def __init__(self, computations, shapes):
+        self.computations = computations
+        self.env_shapes = shapes
+    
+    def Compile(self, argument_shapes=(), compile_options=None, layout_fn=None, backend=None ):
+        # self.env_shapes.update({v:s for v, s in zip(self.computations[0][0], argument_shapes)})
+        return CompositeExecutable([
+            (in_vars, out_vars, c.Compile(argument_shapes=tuple([self.env_shapes[v] for v in in_vars]),
+                                         compile_options=compile_options,
+                                         layout_fn=layout_fn,
+                                         backend=backend))
+            for in_vars, out_vars, c in self.computations
+        ])
+    
+    def __getattr__(self, method):
+        return getattr(self.computations[-1][2], method)
+ 
+class CompositeExecutable(object):
+    def __init__(self, executables):
+        self.executables = executables
+    
+    def Execute(self, in_bufs, check_buffers):
+        env = {}
+        for i, (in_vars, out_vars, e) in enumerate(self.executables):
+            pyexec = isinstance(e, PyFunc)
+            if i > 0:
+                in_bufs = [env[v] if pyexec else device_put(env[v]) for v in in_vars]
+
+            bufs = e.Execute(in_bufs, check_buffers)
+            out_vars = out_vars if isinstance(out_vars, list) or isinstance(out_vars, tuple) else [out_vars]
+            pybufs = bufs if pyexec else bufs.to_py()
+            env.update({k: b  for k, b in zip(out_vars, pybufs)})
+        return bufs
 
 def make_computation_builder(name):
   return _JaxComputationBuilder(name)
-
 
 def register_constant_handler(type_, handler_fun):
   _constant_handlers[type_] = handler_fun

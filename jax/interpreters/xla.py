@@ -190,6 +190,7 @@ def build_jaxpr(jaxpr, const_vals, *abstract_args):
 
 def jaxpr_computation(jaxpr, const_vals, freevar_shapes, *arg_shapes):
   c = xb.make_computation_builder("jaxpr_computation")
+  computations = []
 
   def read(v):
     return env[v]
@@ -208,6 +209,8 @@ def jaxpr_computation(jaxpr, const_vals, freevar_shapes, *arg_shapes):
     all_freevars = it.chain(jaxpr.constvars, jaxpr.freevars)
     map(write, all_freevars, map(c.ParameterWithShape, freevar_shapes))
   map(write, jaxpr.invars, map(c.ParameterWithShape, arg_shapes))
+  c_invars = jaxpr.invars
+  v_shapes = {v:s for v,s in zip(jaxpr.invars, arg_shapes)}
   for eqn in jaxpr.eqns:
     in_nodes = map(read, eqn.invars)
     in_shapes = map(c.GetShape, in_nodes)
@@ -220,10 +223,42 @@ def jaxpr_computation(jaxpr, const_vals, freevar_shapes, *arg_shapes):
     subfuns = [(subc, tuple(map(read, const_bindings + freevar_bindings)))
                for subc, (_, const_bindings, freevar_bindings)
                in zip(subcs, eqn.bound_subjaxprs)]
-    ans = translation_rule(eqn.primitive)(c, *(subfuns + in_nodes), **eqn.params)
-    out_nodes = xla_destructure(c, ans) if eqn.destructure else [ans]
+    if translation_rule(eqn.primitive) == 'pyfunc':
+        assert len(eqn.outvars) == 1
+        # evalaute all variables, create their translation into the new env
+        new_c = xb.make_computation_builder(f'jaxpr_computation_{len(computations)}')
+        new_env = {}
+        # if const_vals:
+        #    map(write, jax
+        new_invars = []
+        for v, node in env.items():
+            if v in jaxpr.constvars:
+                new_env[v] = new_c.Constant(consts_env[v])
+            else:
+                new_invars.append(v)
+                new_env[v] = new_c.ParameterWithShape(c.GetShape(node))
+        env_list = [(v,n) for v,n in env.items()]
+        v_shapes.update({v:c.GetShape(n) for v, n in env.items()})
+        env_inverted = {n:v for v,n in env_list}
+        out_tuple = c.Tuple(*[n for _,n in env_list])
+        computations.append((c_invars, [v for v,n in env_list], c.Build(out_tuple)))
+        pyfunc = xb.PyFunc(eqn.primitive.bind, [env_inverted[n] for n in in_nodes], out_shape=v_shapes[env_inverted[in_nodes[0]]])
+        computations.append((eqn.invars, eqn.outvars, pyfunc))
+        out_nodes = [new_c.ParameterWithShape(pyfunc.out_shape)]
+        new_invars += eqn.outvars
+        v_shapes[eqn.outvars[0]] = pyfunc.out_shape
+        c = new_c
+        env.update(new_env)
+        c_invars = new_invars
+    else:
+        ans = translation_rule(eqn.primitive)(c, *(subfuns + in_nodes), **eqn.params)
+        out_nodes = xla_destructure(c, ans) if eqn.destructure else [ans]
     map(write, eqn.outvars, out_nodes)
-  return c.Build(read(jaxpr.outvar))
+
+  computations.append((c_invars, jaxpr.outvar, c.Build(read(jaxpr.outvar))))
+  return xb.CompositeComputation(computations, v_shapes)
+
+  # return c.Build(read(jaxpr.outvar))
 
 def xla_destructure(c, ans):
   num_elements = len(c.GetShape(ans).tuple_shapes())
