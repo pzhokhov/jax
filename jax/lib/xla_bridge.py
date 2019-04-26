@@ -362,8 +362,9 @@ class CompositeExecutable(object):
                 in_bufs = [env[v] if pyexec else device_put(env[v]) for v in in_vars]
 
             bufs = e.Execute(in_bufs, check_buffers)
-            out_vars = out_vars if isinstance(out_vars, list) or isinstance(out_vars, tuple) else [out_vars]
             pybufs = bufs if pyexec else bufs.to_py()
+            out_vars = out_vars if isinstance(out_vars, list) or isinstance(out_vars, tuple) else [out_vars]
+            pybufs = pybufs if isinstance(pybufs, list) or isinstance(pybufs, tuple) else [pybufs]
             env.update({k: b  for k, b in zip(out_vars, pybufs)})
         return bufs
 
