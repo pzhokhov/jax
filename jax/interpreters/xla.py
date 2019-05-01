@@ -86,6 +86,12 @@ def execute_compiled_primitive(compiled, result_handler, *args):
   return result_handler(compiled.Execute(input_bufs, not core.skip_checks))
 
 def device_put(x, device_num=0):
+  from jaxlib import xla_client
+  if isinstance(x, xla_client.LocalBuffer):
+    if x.device() == device_num:
+      return x
+    else:
+      return device_put(x.to_py(), device_num)
   x = canonicalize_pyval_dtype(x)
   if type(x) is DeviceArray:
     if x.device_buffer.device() == device_num:
@@ -94,6 +100,7 @@ def device_put(x, device_num=0):
       # TODO(phawkins): perform a direct device-to-device copy rather than
       # bouncing via the host.
       return device_put(x.device_buffer.to_py(), device_num)
+    
   elif isinstance(x, DeviceConstant):
     return instantiate_device_constant(x, device_num=device_num)
   else:
@@ -210,8 +217,17 @@ def jaxpr_computation(jaxpr, const_vals, freevar_shapes, *arg_shapes):
     map(write, all_freevars, map(c.ParameterWithShape, freevar_shapes))
   map(write, jaxpr.invars, map(c.ParameterWithShape, arg_shapes))
   c_invars = jaxpr.invars
+  # c_invars = []
   v_shapes = {v:s for v,s in zip(jaxpr.invars, arg_shapes)}
-  for eqn in jaxpr.eqns:
+  input_handler = identity
+  # assert set(jaxpr.invars) & set([v for eq in jaxpr.eqns for v in eq.invars]) == set(jaxpr.invars)
+  for eqn_idx, eqn in enumerate(jaxpr.eqns):
+    for v in eqn.invars:
+        if v not in env:
+            write(v, c.ParameterWithShape(v_shapes[v]))
+            c_invars.append(v)
+    # map(lambda v: write(v, c.ParameterWithShape(v_shapes[v])), [v for v in eqn.invars if v not in env])
+
     in_nodes = map(read, eqn.invars)
     in_shapes = map(c.GetShape, in_nodes)
     subcs = [
@@ -223,40 +239,50 @@ def jaxpr_computation(jaxpr, const_vals, freevar_shapes, *arg_shapes):
     subfuns = [(subc, tuple(map(read, const_bindings + freevar_bindings)))
                for subc, (_, const_bindings, freevar_bindings)
                in zip(subcs, eqn.bound_subjaxprs)]
+   
     if translation_rule(eqn.primitive) == 'pyfunc':
-        assert len(eqn.outvars) == 1
-        # evalaute all variables, create their translation into the new env
-        new_c = xb.make_computation_builder(f'jaxpr_computation_{len(computations)}')
-        new_env = {}
-        # if const_vals:
-        #    map(write, jax
-        new_invars = []
-        for v, node in env.items():
-            if v in jaxpr.constvars:
-                new_env[v] = new_c.Constant(consts_env[v])
-            else:
-                new_invars.append(v)
-                new_env[v] = new_c.ParameterWithShape(c.GetShape(node))
-        env_list = [(v,n) for v,n in env.items()]
-        v_shapes.update({v:c.GetShape(n) for v, n in env.items()})
-        env_inverted = {n:v for v,n in env_list}
-        out_tuple = c.Tuple(*[n for _,n in env_list])
-        computations.append((c_invars, [v for v,n in env_list], c.Build(out_tuple)))
-        pyfunc = xb.PyFunc(eqn.primitive.bind, [env_inverted[n] for n in in_nodes], out_shape=v_shapes[env_inverted[in_nodes[0]]])
-        computations.append((eqn.invars, eqn.outvars, pyfunc))
-        out_nodes = [new_c.ParameterWithShape(pyfunc.out_shape)]
-        new_invars += eqn.outvars
-        v_shapes[eqn.outvars[0]] = pyfunc.out_shape
-        c = new_c
-        env.update(new_env)
-        c_invars = new_invars
-    else:
-        ans = translation_rule(eqn.primitive)(c, *(subfuns + in_nodes), **eqn.params)
-        out_nodes = xla_destructure(c, ans) if eqn.destructure else [ans]
-    map(write, eqn.outvars, out_nodes)
+      assert len(eqn.outvars) == 1
+      # evalaute all variables, create their translation into the new env
+      env_list = [(v,n) for v,n in env.items()]
+      v_shapes.update({v:c.GetShape(n) for v, n in env.items()})
+      env_inverted = {n:v for v,n in env_list}
+      exported_vars = list(set(v for eq in jaxpr.eqns[eqn_idx:] for v in eq.invars if v in env and v not in jaxpr.invars))
+      # imported_vars = list(set(v for eq in jaxpr.eqns[eqn_idx+1:] for v in eq.invars if v in env))
+    
+      new_c = xb.make_computation_builder(f'jaxpr_computation_{len(computations)}')
+      new_env = {}
+      new_invars = []
+      for v in jaxpr.constvars:
+        new_env[v] = new_c.Constant(consts_env[v])
+      # for v in imported_vars:
+      #   new_invars.append(v)
+      #   new_env[v] = new_c.ParameterWithShape(c.GetShape(env[v]))
 
-  computations.append((c_invars, jaxpr.outvar, c.Build(read(jaxpr.outvar))))
-  return xb.CompositeComputation(computations, v_shapes)
+      out_tuple = c.Tuple(*[env[v] for v in exported_vars])
+      built_c = c.Build(out_tuple)
+      result_shape = xla_shape_to_result_shape(built_c.GetReturnValueShape())
+  
+      computations.append((c_invars, exported_vars, input_handler, result_handler(result_shape), built_c))
+      pyfunc = xb.PyFunc(eqn.primitive.bind, [env_inverted[n] for n in in_nodes], out_shape=v_shapes[env_inverted[in_nodes[0]]])
+      computations.append((eqn.invars, eqn.outvars, identity, identity, pyfunc))
+      out_nodes = [new_c.ParameterWithShape(pyfunc.out_shape)]
+      new_invars += eqn.outvars
+      v_shapes[eqn.outvars[0]] = pyfunc.out_shape
+
+      c = new_c
+      env = new_env
+      c_invars = [eqn.outvars[0]]
+
+      def _input_handler(x):
+        return [device_put(v) for v in x]
+      input_handler = _input_handler
+    else:
+      ans = translation_rule(eqn.primitive)(c, *(subfuns + in_nodes), **eqn.params)
+      out_nodes = xla_destructure(c, ans) if eqn.destructure else [ans]
+    map(write, eqn.outvars, out_nodes)
+   
+  computations.append((c_invars, jaxpr.outvar, input_handler, identity, c.Build(read(jaxpr.outvar))))
+  return xb.CompositeComputation(jaxpr.invars, computations, v_shapes)
 
   # return c.Build(read(jaxpr.outvar))
 
@@ -573,3 +599,15 @@ xla_call_p.def_impl(xla_call_impl)
 
 translations[xla_call_p] = xla_call_translation_rule
 ad.primitive_transposes[xla_call_p] = partial(ad.call_transpose, xla_call_p)
+
+
+def pyfunc_linear(primitive_name, abstract_eval=lambda x: x):
+  def _pyfunc_linear_internal(func):
+    p = core.Primitive(primitive_name)
+    p.def_impl(func)
+    p.def_abstract_eval(abstract_eval)
+    ad.deflinear(p, p.bind)
+    translations[p] = 'pyfunc'
+    return p.bind
+  return _pyfunc_linear_internal
+    

@@ -8,17 +8,11 @@ class PyFuncTest(jtu.JaxTestCase):
   def testPyFunc(self):
     # the is really the example of how jax should not be used - a python function with a side effect
     call_counter = [0]
-    p = Primitive('_my_test_func_f')
-    
-    def f_impl(x):
+ 
+    @xla.pyfunc_linear('_my_f')   
+    def f(x):
       call_counter[0] += 1
       return x
-    
-    p.def_impl(f_impl)
-    p.def_abstract_eval(lambda x: x)
-    ad.deflinear(p, lambda x: p.bind(x))
-    f = lambda x: p.bind(x)
-    xla.translations[p] = 'pyfunc'
 
     g = jax.jit(lambda x: f(x) + 1)
     n_trials = 10

@@ -33,6 +33,7 @@ from jax.experimental import stax
 from jax.experimental.stax import Dense, Relu, LogSoftmax
 from examples import datasets
 
+from jax.experimental.mpi_optimizers import mpi_wrap
 
 def loss(params, batch):
   inputs, targets = batch
@@ -54,7 +55,7 @@ if __name__ == "__main__":
   rng = random.PRNGKey(0)
 
   step_size = 0.001
-  num_epochs = 10
+  num_epochs = 4
   batch_size = 128
   momentum_mass = 0.9
 
@@ -73,6 +74,7 @@ if __name__ == "__main__":
   batches = data_stream()
 
   opt_init, opt_update = optimizers.momentum(step_size, mass=momentum_mass)
+  # opt_init, opt_update = mpi_wrap(optimizers.momentum(step_size, mass=momentum_mass))
 
   @jit
   def update(i, opt_state, batch):

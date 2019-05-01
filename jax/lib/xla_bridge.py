@@ -174,17 +174,7 @@ def device_count():
 
 
 def device_put(pyval, device_num=0):
-  return xla_client.LocalBuffer.from_pyval(pyval, device_num,
-                                           backend=get_backend())
-
-def device_put_many(pyvals_and_devices):
-  # TODO(phawkins): remove the fallback path after dropping dependencies on
-  # Jaxlib older than 0.1.13.
-  if hasattr(xla_client.LocalBuffer, "from_pyvals"):
-    return xla_client.LocalBuffer.from_pyvals(pyvals_and_devices,
-                                              backend=get_backend())
-  else:
-    return [device_put(pyval, device) for (pyval, device) in pyvals_and_devices]
+  return xla_client.LocalBuffer.from_pyval(pyval, device_num, backend=get_backend())
 
 
 Shape = xla_client.Shape        # pylint: disable=invalid-name
@@ -333,39 +323,39 @@ class PyFunc(object):
     
     
 class CompositeComputation(object):
-    def __init__(self, computations, shapes):
+    def __init__(self, invars, computations, shapes):
         self.computations = computations
         self.env_shapes = shapes
+        self.invars = invars
     
     def Compile(self, argument_shapes=(), compile_options=None, layout_fn=None, backend=None ):
         # self.env_shapes.update({v:s for v, s in zip(self.computations[0][0], argument_shapes)})
-        return CompositeExecutable([
-            (in_vars, out_vars, c.Compile(argument_shapes=tuple([self.env_shapes[v] for v in in_vars]),
-                                         compile_options=compile_options,
-                                         layout_fn=layout_fn,
-                                         backend=backend))
-            for in_vars, out_vars, c in self.computations
+        return CompositeExecutable(self.invars, [
+            (in_vars, out_vars, input_handler, result_handler, c.Compile(argument_shapes=tuple([self.env_shapes[v] for v in in_vars]),
+                                                        compile_options=compile_options,
+                                                        layout_fn=layout_fn,
+                                                        backend=backend))
+            for in_vars, out_vars, input_handler, result_handler, c in self.computations
         ])
     
     def __getattr__(self, method):
-        return getattr(self.computations[-1][2], method)
+        return getattr(self.computations[-1][-1], method)
  
 class CompositeExecutable(object):
-    def __init__(self, executables):
+    def __init__(self, invars, executables):
         self.executables = executables
+        self.invars = invars
     
     def Execute(self, in_bufs, check_buffers):
-        env = {}
-        for i, (in_vars, out_vars, e) in enumerate(self.executables):
-            pyexec = isinstance(e, PyFunc)
-            if i > 0:
-                in_bufs = [env[v] if pyexec else device_put(env[v]) for v in in_vars]
-
-            bufs = e.Execute(in_bufs, check_buffers)
-            pybufs = bufs if pyexec else bufs.to_py()
-            out_vars = out_vars if isinstance(out_vars, list) or isinstance(out_vars, tuple) else [out_vars]
-            pybufs = pybufs if isinstance(pybufs, list) or isinstance(pybufs, tuple) else [pybufs]
-            env.update({k: b  for k, b in zip(out_vars, pybufs)})
+        env = {v:b for v,b in zip(self.invars, in_bufs)}
+        for i, (in_vars, out_vars, input_handler, result_handler, e) in enumerate(self.executables):
+            in_bufs = input_handler([env[v] for v in in_vars])
+            bufs = result_handler(e.Execute(in_bufs, check_buffers))
+            if i < len(self.executables) - 1:
+                pybufs = bufs
+                out_vars = out_vars if isinstance(out_vars, list) or isinstance(out_vars, tuple) else [out_vars]
+                pybufs = pybufs if isinstance(pybufs, list) or isinstance(pybufs, tuple) else [pybufs]
+                env.update({k: b  for k, b in zip(out_vars, pybufs)})
         return bufs
 
 def make_computation_builder(name):
